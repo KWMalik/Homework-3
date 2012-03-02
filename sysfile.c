@@ -3,23 +3,32 @@
 #include "param.h"
 #include "stat.h"
 #include "mmu.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
 #include "fs.h"
 #include "file.h"
 #include "fcntl.h"
 
-// Fetch the nth word-sized system call argument as a file descriptor
-// and return both the descriptor and the corresponding struct file.
 static int
-argfd(int n, int *pfd, struct file **pf)
+getfd(int n, int *pfd, struct file **pf)
 {
   int fd;
   struct file *f;
 
-  if(argint(n, &fd) < 0)
+  if(getuserint(n, &fd) < 0)
     return -1;
-  if(fd < 0 || fd >= NOFILE || (f=proc->ofile[fd]) == 0)
+  if(fd < 0 || fd >= NOFILE)
     return -1;
+
+  acquire(&proc->common->lock);
+  f = proc->common->ofile[fd];
+  if (f != 0)
+    filedup(f);
+  release(&proc->common->lock);
+  if (f == 0)
+    return -1;
+
   if(pfd)
     *pfd = fd;
   if(pf)
@@ -27,19 +36,26 @@ argfd(int n, int *pfd, struct file **pf)
   return 0;
 }
 
-// Allocate a file descriptor for the given file.
-// Takes over file reference from caller on success.
+static void
+putfd(struct file *f)
+{
+  fileclose(f);
+}
+
 static int
 fdalloc(struct file *f)
 {
   int fd;
 
+  acquire(&proc->common->lock);
   for(fd = 0; fd < NOFILE; fd++){
-    if(proc->ofile[fd] == 0){
-      proc->ofile[fd] = f;
+    if(proc->common->ofile[fd] == 0){
+      proc->common->ofile[fd] = f;
+      release(&proc->common->lock);
       return fd;
     }
   }
+  release(&proc->common->lock);
   return -1;
 }
 
@@ -49,36 +65,72 @@ sys_dup(void)
   struct file *f;
   int fd;
   
-  if(argfd(0, 0, &f) < 0)
+  if(getfd(0, 0, &f) < 0)
     return -1;
   if((fd=fdalloc(f)) < 0)
-    return -1;
+    goto error;
   filedup(f);
+
+  putfd(f);
   return fd;
+
+error:
+  putfd(f);
+  return -1;
 }
 
 int
 sys_read(void)
 {
   struct file *f;
-  int n;
+  int n, ret;
   char *p;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
+  if (getfd(0, 0, &f) < 0)
     return -1;
-  return fileread(f, p, n);
+
+  if (getuserint(2, &n) < 0 || n > PGSIZE || (p = kalloc()) == 0)
+    goto e_fd;
+
+  if ((ret = fileread(f, p, n)) < 0 || putuserbuf(1, p, n) < 0)
+    goto e_ka;
+
+  kfree(p);
+  putfd(f);
+  return ret;
+
+e_ka:
+  kfree(p);
+e_fd:
+  putfd(f);
+  return -1;
 }
 
 int
 sys_write(void)
 {
   struct file *f;
-  int n;
+  int n, ret;
   char *p;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
+  if (getfd(0, 0, &f) < 0)
     return -1;
-  return filewrite(f, p, n);
+
+  if (getuserint(2, &n) < 0 || n > PGSIZE || (p = kalloc()) == 0)
+    goto e_fd;
+
+  if (getuserbuf(1, p, n) < 0 || (ret = filewrite(f, p, n)) < 0)
+    goto e_ka;
+
+  kfree(p);
+  putfd(f);
+  return ret;
+
+e_ka:
+  kfree(p);
+e_fd:
+  putfd(f);
+  return -1;
 }
 
 int
@@ -87,10 +139,13 @@ sys_close(void)
   int fd;
   struct file *f;
   
-  if(argfd(0, &fd, &f) < 0)
+  if(getfd(0, &fd, &f) < 0)
     return -1;
-  proc->ofile[fd] = 0;
+
+  proc->common->ofile[fd] = 0;
   fileclose(f);
+
+  putfd(f);
   return 0;
 }
 
@@ -98,23 +153,34 @@ int
 sys_fstat(void)
 {
   struct file *f;
-  struct stat *st;
-  
-  if(argfd(0, 0, &f) < 0 || argptr(1, (void*)&st, sizeof(*st)) < 0)
+  struct stat st;
+  int ret;
+
+  if (getfd(0, 0, &f) < 0)
     return -1;
-  return filestat(f, st);
+
+  if ((ret = filestat(f, &st)) < 0 || putuserbuf(1, &st, sizeof(struct stat)) < 0)
+    goto e_fd;
+
+  putfd(f);
+  return ret;
+
+e_fd:
+  putfd(f);
+  return -1;
 }
 
 // Create the path new as a link to the same inode as old.
 int
 sys_link(void)
 {
-  char name[DIRSIZ], *new, *old;
+  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
   struct inode *dp, *ip;
+  int str;
 
-  if(argstr(0, &old) < 0 || argstr(1, &new) < 0)
-    return -1;
-  if((ip = namei(old)) == 0)
+  if ((str = getuserstr(0, old, MAXPATH)) < 0 || str >= MAXPATH ||
+      (str = getuserstr(1, new, MAXPATH)) < 0 || str >= MAXPATH ||
+      (ip = namei(old)) == 0)
     return -1;
 
   begin_trans();
@@ -175,12 +241,12 @@ sys_unlink(void)
 {
   struct inode *ip, *dp;
   struct dirent de;
-  char name[DIRSIZ], *path;
+  char name[DIRSIZ], path[MAXPATH];
   uint off;
+  int str;
 
-  if(argstr(0, &path) < 0)
-    return -1;
-  if((dp = nameiparent(path, name)) == 0)
+  if ((str = getuserstr(0, path, MAXPATH)) < 0 || str >= MAXPATH ||
+      (dp = nameiparent(path, name)) == 0)
     return -1;
 
   begin_trans();
@@ -223,6 +289,7 @@ bad:
   iunlockput(dp);
   commit_trans();
   return -1;
+
 }
 
 static struct inode*
@@ -273,13 +340,15 @@ create(char *path, short type, short major, short minor)
 int
 sys_open(void)
 {
-  char *path;
-  int fd, omode;
+  char path[MAXPATH];
+  int fd, omode, len;
   struct file *f;
   struct inode *ip;
 
-  if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
+  if ((len = getuserstr(0, path, MAXPATH)) < 0 || len >= MAXPATH ||
+      getuserint(1, &omode) < 0)
     return -1;
+
   if(omode & O_CREATE){
     begin_trans();
     ip = create(path, T_FILE, 0, 0);
@@ -315,11 +384,13 @@ sys_open(void)
 int
 sys_mkdir(void)
 {
-  char *path;
+  char path[MAXPATH];
   struct inode *ip;
+  int len;
 
   begin_trans();
-  if(argstr(0, &path) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
+  if((len = getuserstr(0, path, MAXPATH)) < 0 || len >= MAXPATH ||
+     (ip = create(path, T_DIR, 0, 0)) == 0){
     commit_trans();
     return -1;
   }
@@ -332,14 +403,13 @@ int
 sys_mknod(void)
 {
   struct inode *ip;
-  char *path;
+  char path[MAXPATH];
   int len;
   int major, minor;
   
   begin_trans();
-  if((len=argstr(0, &path)) < 0 ||
-     argint(1, &major) < 0 ||
-     argint(2, &minor) < 0 ||
+  if((len=getuserstr(0, path, MAXPATH)) < 0 || len >= MAXPATH ||
+     getuserint(1, &major) < 0 || getuserint(2, &minor) < 0 ||
      (ip = create(path, T_DEV, major, minor)) == 0){
     commit_trans();
     return -1;
@@ -352,32 +422,38 @@ sys_mknod(void)
 int
 sys_chdir(void)
 {
-  char *path;
+  char path[MAXPATH];
   struct inode *ip;
+  int len;
 
-  if(argstr(0, &path) < 0 || (ip = namei(path)) == 0)
+  if ((len = getuserstr(0, path, MAXPATH)) < 0 || len >= MAXPATH ||
+      (ip = namei(path)) == 0)
     return -1;
+
   ilock(ip);
   if(ip->type != T_DIR){
     iunlockput(ip);
     return -1;
   }
   iunlock(ip);
-  iput(proc->cwd);
-  proc->cwd = ip;
+  acquire(&proc->common->lock);
+  iput(proc->common->cwd);
+  proc->common->cwd = ip;
+  release(&proc->common->lock);
   return 0;
 }
 
 int
 sys_exec(void)
 {
-  char *path, *argv[MAXARG];
-  int i;
+  char path[MAXPATH], *argv[MAXARG];
+  int i, len;
   uint uargv, uarg;
 
-  if(argstr(0, &path) < 0 || argint(1, (int*)&uargv) < 0){
+  if ((len = getuserstr(0, path, MAXPATH)) < 0 || len >= MAXPATH ||
+      getuserint(1, (int *)&uargv) < 0)
     return -1;
-  }
+
   memset(argv, 0, sizeof(argv));
   for(i=0;; i++){
     if(i >= NELEM(argv))
@@ -388,7 +464,8 @@ sys_exec(void)
       argv[i] = 0;
       break;
     }
-    if(fetchstr(proc, uarg, &argv[i]) < 0)
+    // Safe.. exec() prohibited in threaded processes
+    if (fetchstr_legacy(proc, uarg, &argv[i]) < 0)
       return -1;
   }
   return exec(path, argv);
@@ -397,23 +474,26 @@ sys_exec(void)
 int
 sys_pipe(void)
 {
-  int *fd;
   struct file *rf, *wf;
-  int fd0, fd1;
+  int fd[2];
 
-  if(argptr(0, (void*)&fd, 2*sizeof(fd[0])) < 0)
+  if (pipealloc(&rf, &wf) < 0)
     return -1;
-  if(pipealloc(&rf, &wf) < 0)
-    return -1;
-  fd0 = -1;
-  if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
-    if(fd0 >= 0)
-      proc->ofile[fd0] = 0;
-    fileclose(rf);
-    fileclose(wf);
-    return -1;
-  }
-  fd[0] = fd0;
-  fd[1] = fd1;
+  if ((fd[0] = fdalloc(rf)) < 0)
+    goto e_pa;
+  if ((fd[1] = fdalloc(wf)) < 0)
+    goto e_rf;
+  if (putuserbuf(0, fd, sizeof(fd)) < 0)
+    goto e_wf;
+
   return 0;
+
+e_wf:
+  proc->common->ofile[fd[1]] = 0;
+e_rf:
+  proc->common->ofile[fd[0]] = 0;
+e_pa:
+  fileclose(rf);
+  fileclose(wf);
+  return -1;
 }

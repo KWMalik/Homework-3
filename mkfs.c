@@ -11,10 +11,12 @@
 #include "stat.h"
 #include "param.h"
 
-int nblocks = 985;
+// when changing disk size, adjust nblocks accordingly so that
+// "assert(nblocks + usedblocks == size)" does not fail
+int nblocks = 1984;
 int nlog = LOGSIZE;
-int ninodes = 200;
-int size = 1024;
+int ninodes = 400;
+int size = 2048;
 
 int fsfd;
 struct superblock sb;

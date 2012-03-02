@@ -7,6 +7,7 @@
 #include "param.h"
 #include "traps.h"
 #include "spinlock.h"
+#include "rwlock.h"
 #include "fs.h"
 #include "file.h"
 #include "memlayout.h"
@@ -236,7 +237,7 @@ consoleread(struct inode *ip, char *dst, int n)
   acquire(&input.lock);
   while(n > 0){
     while(input.r == input.w){
-      if(proc->killed){
+      if(proc->common->killed){
         release(&input.lock);
         ilock(ip);
         return -1;

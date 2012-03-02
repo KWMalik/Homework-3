@@ -21,3 +21,12 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+
+// HW3: This system call is for test only.
+// Do NOT use it in your own user programs. 
+#define SYS_rwlock 22
+#define SYS_pschk  23
+
+#define SYS_tfork  24
+#define SYS_texit  25
+#define SYS_twait  26

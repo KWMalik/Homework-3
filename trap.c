@@ -3,10 +3,11 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
 #include "x86.h"
 #include "traps.h"
-#include "spinlock.h"
 
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
@@ -37,12 +38,26 @@ void
 trap(struct trapframe *tf)
 {
   if(tf->trapno == T_SYSCALL){
-    if(proc->killed)
-      exit();
+    // Different behavior of main / non-main thread..
+    if(proc->common->killed) {
+      if (proc->common == &proc->threadcommon)
+        exit();
+      else
+        texit();
+      panic("trap when killed");
+    }
+
     proc->tf = tf;
     syscall();
-    if(proc->killed)
-      exit();
+
+    if(proc->common->killed) {
+      if (proc->common == &proc->threadcommon)
+        exit();
+      else
+        texit();
+      panic("trap when killed");
+    }
+
     return;
   }
 
@@ -91,13 +106,13 @@ trap(struct trapframe *tf)
             "eip 0x%x addr 0x%x--kill proc\n",
             proc->pid, proc->name, tf->trapno, tf->err, cpu->id, tf->eip, 
             rcr2());
-    proc->killed = 1;
+    proc->common->killed = 1;
   }
 
   // Force process exit if it has been killed and is in user space.
   // (If it is still executing in the kernel, let it keep running 
   // until it gets to the regular system call return.)
-  if(proc && proc->killed && (tf->cs&3) == DPL_USER)
+  if(proc && proc->common->killed && (tf->cs&3) == DPL_USER)
     exit();
 
   // Force process to give up CPU on clock tick.
@@ -106,6 +121,6 @@ trap(struct trapframe *tf)
     yield();
 
   // Check if the process has been killed since we yielded
-  if(proc && proc->killed && (tf->cs&3) == DPL_USER)
+  if(proc && proc->common->killed && (tf->cs&3) == DPL_USER)
     exit();
 }

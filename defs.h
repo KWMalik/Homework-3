@@ -7,6 +7,8 @@ struct proc;
 struct spinlock;
 struct stat;
 struct superblock;
+// added for HW3
+struct rwlock;
 
 // bio.c
 void            binit(void);
@@ -106,7 +108,7 @@ int             pipewrite(struct pipe*, char*, int);
 struct proc*    copyproc(struct proc*);
 void            exit(void);
 int             fork(void);
-int             growproc(int);
+int             growproc(int n, int *addr);
 int             kill(int);
 void            pinit(void);
 void            procdump(void);
@@ -117,6 +119,20 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int             pschk(void);
+int             tfork(uint, uint, uint);
+int             texit(void);
+int             twait(int pid);
+void            twait_all(void);
+int             threaded(void);
+
+// rwlock.c
+void            initrwlock(struct rwlock *);
+void            destroyrwlock(struct rwlock *);
+void            readlock(struct rwlock *);
+void            readunlock(struct rwlock *);
+void            writelock(struct rwlock *);
+void            writeunlock(struct rwlock *);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
@@ -143,8 +159,17 @@ char*           strncpy(char*, const char*, int);
 int             argint(int, int*);
 int             argptr(int, char**, int);
 int             argstr(int, char**);
+int             fetchstr_legacy(struct proc*, uint, char**);
 int             fetchint(struct proc*, uint, int*);
-int             fetchstr(struct proc*, uint, char**);
+int             fetchstr(struct proc*, uint, char*, uint);
+int             fetchbuf(struct proc*, uint, void*, uint);
+int             writeint(struct proc*, uint, int);
+int             writestr(struct proc*, uint, char*, uint);
+int             writebuf(struct proc*, uint, void*, uint);
+int             getuserint(int, int*);
+int             getuserbuf(int, void*, int);
+int             getuserstr(int, char*, int);
+int             putuserbuf(int, void*, int);
 void            syscall(void);
 
 // timer.c

@@ -142,6 +142,8 @@ struct segdesc {
 
 // Address in page table or page directory entry
 #define PTE_ADDR(pte)   ((uint)(pte) & ~0xFFF)
+// Offset of an address in a page, -junfeng
+#define PGOFFSET(x)     ((uint) (x) & (PGSIZE-1))
 
 #ifndef __ASSEMBLER__
 typedef uint pte_t;

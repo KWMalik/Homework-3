@@ -1,8 +1,10 @@
 #include "types.h"
 #include "defs.h"
 #include "param.h"
-#include "memlayout.h"
 #include "mmu.h"
+#include "memlayout.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
 #include "x86.h"
 #include "syscall.h"
@@ -13,44 +15,149 @@
 // library system call function. The saved user %esp points
 // to a saved program counter, and then the first argument.
 
-// Fetch the int at addr from process p.
 int
 fetchint(struct proc *p, uint addr, int *ip)
 {
-  if(addr >= p->sz || addr+4 > p->sz)
+  readlock(&p->common->pglock);
+
+  if (addr >= p->common->sz || addr+4 > p->common->sz) {
+    readunlock(&p->common->pglock);
     return -1;
+  }
+
   *ip = *(int*)(addr);
+
+  readunlock(&p->common->pglock);
   return 0;
 }
 
-// Fetch the nul-terminated string at addr from process p.
-// Doesn't actually copy the string - just sets *pp to point at it.
-// Returns length of string, not including nul.
 int
-fetchstr(struct proc *p, uint addr, char **pp)
+fetchstr(struct proc *p, uint addr, char *dst, uint dsz)
 {
-  char *s, *ep;
+  char *s;
+  uint sz = 0;
 
-  if(addr >= p->sz)
-    return -1;
-  *pp = (char*)addr;
-  ep = (char*)p->sz;
-  for(s = *pp; s < ep; s++)
-    if(*s == 0)
-      return s - *pp;
+  readlock(&p->common->pglock);
+
+  if (addr >= p->common->sz)
+    goto error;
+
+  for (s = (char *)addr; s < (char *)p->common->sz; s++) {
+    if (sz++ < dsz)
+      *(dst++) = *s;
+    if (*s == '\0') {
+        readunlock(&p->common->pglock);
+        return sz - 1;
+    }
+  }
+
+error:
+  readunlock(&p->common->pglock);
   return -1;
 }
 
-// Fetch the nth 32-bit system call argument.
+int
+fetchbuf(struct proc *p, uint addr, void *dst, uint sz)
+{
+  readlock(&p->common->pglock);
+
+  if(addr >= p->common->sz || (uint)addr+sz >= proc->common->sz)
+    goto error;
+
+  memmove(dst, (char *)addr, sz);
+
+  readunlock(&p->common->pglock);
+  return sz;
+
+error:
+  readunlock(&p->common->pglock);
+  return -1;
+}
+
+int
+writeint(struct proc *p, uint addr, int i)
+{
+  readlock(&p->common->pglock);
+
+  if (addr >= p->common->sz || addr+4 > p->common->sz) {
+    readunlock(&p->common->pglock);
+    return -1;
+  }
+
+  *(int*)(addr) = i;
+
+  readunlock(&p->common->pglock);
+  return 0;
+}
+
+int
+writebuf(struct proc *p, uint addr, void *src, uint sz)
+{
+  readlock(&p->common->pglock);
+
+  if(addr >= p->common->sz || (uint)addr+sz >= proc->common->sz)
+    goto error;
+
+  memmove((char *)addr, src, sz);
+
+  readunlock(&p->common->pglock);
+  return sz;
+
+error:
+  readunlock(&p->common->pglock);
+  return -1;
+}
+
+int
+writestr(struct proc *p, uint addr, char *src, uint dsz)
+{
+  return writebuf(p, addr, src, strlen(src) + 1);
+}
+
+int
+getuserint(int n, int *ip)
+{
+  return fetchint(proc, proc->tf->esp + 4 + 4*n, ip);
+}
+
+int
+getuserbuf(int n, void *dst, int size)
+{
+  int i;
+
+  if (getuserint(n, &i) < 0)
+    return -1;
+  return fetchbuf(proc, (uint)i, dst, size);
+}
+
+int
+getuserstr(int n, char *dst, int dsz)
+{
+  int i;
+
+  if (getuserint(n, &i) < 0)
+    return -1;
+  return fetchstr(proc, (uint)i, dst, dsz);
+}
+
+int
+putuserbuf(int n, void *src, int sz)
+{
+  int i;
+
+  if (getuserint(n, &i) < 0)
+    return -1;
+  return writebuf(proc, (uint)i, src, sz);
+}
+
+// LEGACY CODE BELOW
+
 int
 argint(int n, int *ip)
 {
   return fetchint(proc, proc->tf->esp + 4 + 4*n, ip);
 }
 
-// Fetch the nth word-sized system call argument as a pointer
-// to a block of memory of size n bytes.  Check that the pointer
-// lies within the process address space.
 int
 argptr(int n, char **pp, int size)
 {
@@ -58,23 +165,34 @@ argptr(int n, char **pp, int size)
   
   if(argint(n, &i) < 0)
     return -1;
-  if((uint)i >= proc->sz || (uint)i+size > proc->sz)
+  if((uint)i >= proc->common->sz || (uint)i+size > proc->common->sz)
     return -1;
   *pp = (char*)i;
   return 0;
 }
 
-// Fetch the nth word-sized system call argument as a string pointer.
-// Check that the pointer is valid and the string is nul-terminated.
-// (There is no shared writable memory, so the string can't change
-// between this check and being used by the kernel.)
+int
+fetchstr_legacy(struct proc *p, uint addr, char **pp)
+{
+  char *s, *ep;
+
+  if(addr >= p->common->sz)
+    return -1;
+  *pp = (char*)addr;
+  ep = (char*)p->common->sz;
+  for(s = *pp; s < ep; s++)
+    if(*s == 0)
+      return s - *pp;
+  return -1;
+}
+
 int
 argstr(int n, char **pp)
 {
   int addr;
   if(argint(n, &addr) < 0)
     return -1;
-  return fetchstr(proc, addr, pp);
+  return fetchstr_legacy(proc, addr, pp);
 }
 
 extern int sys_chdir(void);
@@ -98,6 +216,12 @@ extern int sys_unlink(void);
 extern int sys_wait(void);
 extern int sys_write(void);
 extern int sys_uptime(void);
+extern int sys_pschk(void);
+// For HW3
+extern int sys_tfork(void);
+extern int sys_texit(void);
+extern int sys_twait(void);
+extern int sys_rwlock(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -121,13 +245,18 @@ static int (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_rwlock]  sys_rwlock, // for HW3
+[SYS_pschk]   sys_pschk,
+[SYS_tfork]   sys_tfork,
+[SYS_texit]   sys_texit,
+[SYS_twait]   sys_twait,
 };
 
 void
 syscall(void)
 {
   int num;
-
+  
   num = proc->tf->eax;
   if(num >= 0 && num < SYS_open && syscalls[num]) {
     proc->tf->eax = syscalls[num]();

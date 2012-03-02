@@ -1,3 +1,5 @@
+-include conf.mk
+
 OBJS = \
 	bio.o\
 	console.o\
@@ -27,6 +29,8 @@ OBJS = \
 	uart.o\
 	vectors.o\
 	vm.o\
+	rwlock.o\
+# rwlock.o for HW3 Part B:Readers-writer lock
 
 # Cross-compiling (e.g., on Mac OS X)
 #TOOLPREFIX = i386-jos-elf-
@@ -164,6 +168,15 @@ UPROGS=\
 	_usertests\
 	_wc\
 	_zombie\
+	_hw3-test-single\
+	_hw3-test-multiple\
+	_hw3-test-fork\
+	_hw3-test-kill1\
+	_hw3-test-kill2\
+	_hw3-test-readlock\
+	_hw3-test-writelock\
+	_hw3-test-favorwriter\
+# HW3 grading prgrammings
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)
@@ -223,6 +236,24 @@ qemu-gdb: fs.img xv6.img .gdbinit
 qemu-nox-gdb: fs.img xv6.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -nographic $(QEMUOPTS) -S $(QEMUGDB)
+
+realclean: clean
+	rm -rf $(HW)-programming-$(UNI).tar.gz $(HW)-src.tar $(HW).patch
+
+handin: tarball
+	@echo Please upload $(HW)-programming-$(UNI).tar.gz to courseworks. Thank you.
+
+tarball: realclean
+	tar cf $(HW)-src.tar `find . -type f | grep -v '^\.*$$' | grep -v '/\.git/' | grep -v '/cscope.out$$' `
+	git diff origin/$(HW) $(HW) > $(HW).patch
+	tar czf $(HW)-programming-$(UNI).tar.gz $(HW)-src.tar $(HW).patch
+
+grade: grade-$(HW).sh
+	@echo make clean
+	@make clean || \
+		(echo "'make clean' failed. HINT: Do you have another running instance of xv6?" && exit 1)
+	make
+	QEMU='$(QEMU)' QEMUOPTS='$(QEMUOPTS)' sh ./grade-$(HW).sh
 
 # CUT HERE
 # prepare dist for students

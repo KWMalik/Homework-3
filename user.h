@@ -1,4 +1,6 @@
 struct stat;
+struct spinlock;
+struct rwlock;
 
 // system calls
 int fork(void);
@@ -22,6 +24,13 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int pschk(void);
+int tfork(void (*)(void *), void *, char *);
+int texit(void);
+int twait(int);
+// HW3: This system call is for test only.
+// Do NOT use it in your own user programs. 
+int rwlock(struct rwlock *, int);
 
 // ulib.c
 int stat(char*, struct stat*);

@@ -15,8 +15,9 @@
 #include "param.h"
 #include "stat.h"
 #include "mmu.h"
-#include "proc.h"
 #include "spinlock.h"
+#include "rwlock.h"
+#include "proc.h"
 #include "buf.h"
 #include "fs.h"
 #include "file.h"
@@ -569,10 +570,13 @@ namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
 
-  if(*path == '/')
+  if(*path == '/'){
     ip = iget(ROOTDEV, ROOTINO);
-  else
-    ip = idup(proc->cwd);
+  } else{
+    acquire(&proc->common->lock);
+    ip = idup(proc->common->cwd);
+    release(&proc->common->lock);
+  }
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);

@@ -4,8 +4,9 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "x86.h"
-#include "proc.h"
 #include "spinlock.h"
+#include "rwlock.h"
+#include "proc.h"
 
 struct {
   struct spinlock lock;
@@ -24,6 +25,30 @@ void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+}
+
+int
+pschk()
+{
+  struct proc *p;
+  int count = 0;
+
+  acquire(&ptable.lock);
+
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == UNUSED)
+      continue;
+
+    count ++;
+
+    if (p->state == ZOMBIE || p->state == TZOMBIE) {
+      release(&ptable.lock);
+      return -1;
+    }
+  }
+
+  release(&ptable.lock);
+  return count;
 }
 
 //PAGEBREAK: 32
@@ -83,10 +108,15 @@ userinit(void)
   
   p = allocproc();
   initproc = p;
-  if((p->pgdir = setupkvm(kalloc)) == 0)
+  p->common = &p->threadcommon;
+  p->common->count = 1;
+
+  if((p->common->pgdir = setupkvm(kalloc)) == 0)
     panic("userinit: out of memory?");
-  inituvm(p->pgdir, _binary_initcode_start, (int)_binary_initcode_size);
-  p->sz = PGSIZE;
+  inituvm(p->common->pgdir,
+         _binary_initcode_start,
+         (int)_binary_initcode_size);
+  p->common->sz = PGSIZE;
   memset(p->tf, 0, sizeof(*p->tf));
   p->tf->cs = (SEG_UCODE << 3) | DPL_USER;
   p->tf->ds = (SEG_UDATA << 3) | DPL_USER;
@@ -97,7 +127,7 @@ userinit(void)
   p->tf->eip = 0;  // beginning of initcode.S
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
-  p->cwd = namei("/");
+  p->common->cwd = namei("/");
 
   p->state = RUNNABLE;
 }
@@ -105,20 +135,25 @@ userinit(void)
 // Grow current process's memory by n bytes.
 // Return 0 on success, -1 on failure.
 int
-growproc(int n)
+growproc(int n, int *addr)
 {
   uint sz;
-  
-  sz = proc->sz;
-  if(n > 0){
-    if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
-      return -1;
-  } else if(n < 0){
-    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0)
-      return -1;
+
+  writelock(&proc->common->pglock);
+
+  *addr = sz = proc->common->sz;
+  if (n > 0)
+    sz = allocuvm(proc->common->pgdir, sz, sz + n);
+  else if (n < 0)
+    sz = deallocuvm(proc->common->pgdir, sz, sz + n);
+  if (sz == 0) {
+    writeunlock(&proc->common->pglock);
+    return -1;
   }
-  proc->sz = sz;
+  proc->common->sz = sz;
   switchuvm(proc);
+
+  writeunlock(&proc->common->pglock);
   return 0;
 }
 
@@ -135,29 +170,47 @@ fork(void)
   if((np = allocproc()) == 0)
     return -1;
 
+  // Initialize as a process
+  np->common = &np->threadcommon;
+  np->common->count = 1;
+
   // Copy process state from p.
-  if((np->pgdir = copyuvm(proc->pgdir, proc->sz)) == 0){
+  readlock(&proc->common->pglock);
+  if((np->common->pgdir = copyuvm(proc->common->pgdir, proc->common->sz)) == 0){
+    readunlock(&proc->common->pglock);
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
     return -1;
   }
-  np->sz = proc->sz;
-  np->parent = proc;
-  *np->tf = *proc->tf;
+  np->common->sz = proc->common->sz;
+  readunlock(&proc->common->pglock);
+
+  acquire(&proc->common->lock);
+  for(i = 0; i < NOFILE; i++)
+    if(proc->common->ofile[i])
+      np->common->ofile[i] = filedup(proc->common->ofile[i]);
+  np->common->cwd = idup(proc->common->cwd);
+  release(&proc->common->lock);
 
   // Clear %eax so that fork returns 0 in the child.
+  *np->tf = *proc->tf;
   np->tf->eax = 0;
 
-  for(i = 0; i < NOFILE; i++)
-    if(proc->ofile[i])
-      np->ofile[i] = filedup(proc->ofile[i]);
-  np->cwd = idup(proc->cwd);
- 
+// Make sure the page table lock is unlocked.
+  initrwlock(&np->common->pglock);
+
+  np->parent = threadleader;
   pid = np->pid;
   np->state = RUNNABLE;
   safestrcpy(np->name, proc->name, sizeof(proc->name));
   return pid;
+}
+
+int
+tfork(uint entry, uint arg, uint spbottom)
+{
+  return -1;
 }
 
 // Exit the current process.  Does not return.
@@ -172,16 +225,19 @@ exit(void)
   if(proc == initproc)
     panic("init exiting");
 
+  proc->common->count--;
+  proc->common->killed = 0;
+
   // Close all open files.
   for(fd = 0; fd < NOFILE; fd++){
-    if(proc->ofile[fd]){
-      fileclose(proc->ofile[fd]);
-      proc->ofile[fd] = 0;
+    if(proc->common->ofile[fd]){
+      fileclose(proc->common->ofile[fd]);
+      proc->common->ofile[fd] = 0;
     }
   }
 
-  iput(proc->cwd);
-  proc->cwd = 0;
+  iput(proc->common->cwd);
+  proc->common->cwd = 0;
 
   acquire(&ptable.lock);
 
@@ -201,6 +257,12 @@ exit(void)
   proc->state = ZOMBIE;
   sched();
   panic("zombie exit");
+}
+
+int
+texit(void)
+{
+  return -1;
 }
 
 // Wait for a child process to exit and return its pid.
@@ -224,19 +286,19 @@ wait(void)
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
-        freevm(p->pgdir);
+        freevm(p->threadcommon.pgdir);
         p->state = UNUSED;
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
-        p->killed = 0;
+        p->common = 0;
         release(&ptable.lock);
         return pid;
       }
     }
 
     // No point waiting if we don't have any children.
-    if(!havekids || proc->killed){
+    if(!havekids || proc->common->killed){
       release(&ptable.lock);
       return -1;
     }
@@ -246,6 +308,11 @@ wait(void)
   }
 }
 
+int
+twait(int pid)
+{
+  return -1;
+} 
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -405,9 +472,10 @@ kill(int pid)
   struct proc *p;
 
   acquire(&ptable.lock);
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->pid == pid){
-      p->killed = 1;
+      p->common->killed = 1;
       // Wake process from sleep if necessary.
       if(p->state == SLEEPING)
         p->state = RUNNABLE;
@@ -417,6 +485,26 @@ kill(int pid)
   }
   release(&ptable.lock);
   return -1;
+}
+
+int
+threaded()
+{
+  struct proc *p;
+
+  if (proc->common != &proc->threadcommon)
+    return 1;
+
+  acquire(&ptable.lock);
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p != proc && p->common == &proc->threadcommon) {
+      release(&ptable.lock);
+      return 1;
+    }
+  }
+
+  release(&ptable.lock);
+  return 0;
 }
 
 //PAGEBREAK: 36
@@ -432,7 +520,8 @@ procdump(void)
   [SLEEPING]  "sleep ",
   [RUNNABLE]  "runble",
   [RUNNING]   "run   ",
-  [ZOMBIE]    "zombie"
+  [ZOMBIE]    "zombie",
+  [TZOMBIE]   "tzombie"
   };
   int i;
   struct proc *p;
@@ -446,7 +535,8 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("%d %s %s", p->pid, state, p->name);
+    cprintf("%d %s %s %s", common_to_proc(p->common)->pid,
+                           p->pid, state, p->name);
     if(p->state == SLEEPING){
       getcallerpcs((uint*)p->context->ebp+2, pc);
       for(i=0; i<10 && pc[i] != 0; i++)

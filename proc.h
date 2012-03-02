@@ -49,12 +49,29 @@ struct context {
   uint eip;
 };
 
-enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE, TZOMBIE };
+
+// some useful macros for HW3
+#define offsetof(TYPE, MEMBER) ((uint) &((TYPE *)0)->MEMBER)
+#define container_of(ptr, type, member) ({                      \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)( (char *)__mptr - offsetof(type,member) );})
+#define common_to_proc(common) container_of((common), struct proc, threadcommon)
+#define threadleader common_to_proc(proc->common)
 
 // Per-process state
 struct proc {
-  uint sz;                     // Size of process memory (bytes)
-  pde_t* pgdir;                // Page table
+  struct threadcommon {
+    uint sz;                     // Size of process memory (bytes)
+    pde_t* pgdir;                // Page table
+    struct rwlock pglock;        // Page table lock
+    struct file *ofile[NOFILE];  // Open files
+    struct inode *cwd;           // Current directory
+    int killed;                  // If non-zero, have been killed
+    struct spinlock lock;        // Minglei - Lock for the threadcommon
+    int count;                   // Number of threads sharing this common
+  } threadcommon;
+  struct threadcommon *common; // Threadcommon pointer
   char *kstack;                // Bottom of kernel stack for this process
   enum procstate state;        // Process state
   volatile int pid;            // Process ID
@@ -62,9 +79,6 @@ struct proc {
   struct trapframe *tf;        // Trap frame for current syscall
   struct context *context;     // swtch() here to run process
   void *chan;                  // If non-zero, sleeping on chan
-  int killed;                  // If non-zero, have been killed
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
 

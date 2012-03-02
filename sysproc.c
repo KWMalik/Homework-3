@@ -4,7 +4,47 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
+
+int
+sys_tfork(void)
+{
+  int entry, arg, spbottom;
+
+  if (getuserint(0, &entry) < 0)
+    return -1;
+  if (getuserint(1, &arg) < 0)
+    return -1;
+  if (getuserint(2, &spbottom) < 0)
+    return -1;
+
+  return tfork(entry, arg, spbottom);
+}
+
+int
+sys_texit(void)
+{
+  return texit();
+}
+
+int
+sys_twait(void)
+{
+  int pid;
+
+  if (getuserint(0, &pid) < 0)
+    return -1;
+
+  return twait(pid);
+}
+
+int
+sys_pschk(void)
+{
+  return pschk();
+}
 
 int
 sys_fork(void)
@@ -30,7 +70,7 @@ sys_kill(void)
 {
   int pid;
 
-  if(argint(0, &pid) < 0)
+  if(getuserint(0, &pid) < 0)
     return -1;
   return kill(pid);
 }
@@ -46,13 +86,18 @@ sys_sbrk(void)
 {
   int addr;
   int n;
+  int fault = 0;
 
-  if(argint(0, &n) < 0)
+  if(getuserint(0, &n) < 0)
     return -1;
-  addr = proc->sz;
-  if(growproc(n) < 0)
+
+  if(growproc(n, &addr) < 0)
+    fault = 1;
+
+  if (fault)
     return -1;
-  return addr;
+  else
+    return addr;
 }
 
 int
@@ -61,12 +106,12 @@ sys_sleep(void)
   int n;
   uint ticks0;
   
-  if(argint(0, &n) < 0)
+  if(getuserint(0, &n) < 0)
     return -1;
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
-    if(proc->killed){
+    if(proc->common->killed){
       release(&tickslock);
       return -1;
     }

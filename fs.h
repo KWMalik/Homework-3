@@ -49,3 +49,4 @@ struct dirent {
   char name[DIRSIZ];
 };
 
+#define MAXPATH 128

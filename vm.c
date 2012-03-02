@@ -4,6 +4,8 @@
 #include "x86.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
 #include "elf.h"
 
@@ -168,9 +170,9 @@ switchuvm(struct proc *p)
   cpu->ts.ss0 = SEG_KDATA << 3;
   cpu->ts.esp0 = (uint)proc->kstack + KSTACKSIZE;
   ltr(SEG_TSS << 3);
-  if(p->pgdir == 0)
+  if(p->common->pgdir == 0)
     panic("switchuvm: no pgdir");
-  lcr3(v2p(p->pgdir));  // switch to new address space
+  lcr3(v2p(p->common->pgdir));  // switch to new address space
   popcli();
 }
 
@@ -345,7 +347,8 @@ uva2ka(pde_t *pgdir, char *uva)
     return 0;
   if((*pte & PTE_U) == 0)
     return 0;
-  return (char*)p2v(PTE_ADDR(*pte));
+  uint pa = (uint)p2v(PTE_ADDR(*pte)) | PGOFFSET(uva);
+  return (char*)pa;
 }
 
 // Copy len bytes from p to user address va in page table pgdir.

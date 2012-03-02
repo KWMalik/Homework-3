@@ -2,6 +2,8 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
 #include "defs.h"
 #include "x86.h"
@@ -83,9 +85,9 @@ exec(char *path, char **argv)
   safestrcpy(proc->name, last, sizeof(proc->name));
 
   // Commit to the user image.
-  oldpgdir = proc->pgdir;
-  proc->pgdir = pgdir;
-  proc->sz = sz;
+  oldpgdir = proc->common->pgdir;
+  proc->common->pgdir = pgdir;
+  proc->common->sz = sz;
   proc->tf->eip = elf.entry;  // main
   proc->tf->esp = sp;
   switchuvm(proc);
